@@ -1,0 +1,438 @@
+// Package server implementa el modo servidor del PRFC-CC8-2026 v3.
+//
+// PARTE 3 de la implementación. Aquí el juego empieza a aceptar conexiones TCP
+// reales. Toda la lógica del juego sigue en internal/game; este paquete solo
+// agrega la red: aceptar clientes, el lobby, la cuenta regresiva, el ciclo en
+// tiempo real y la difusión del estado.
+//
+// El servidor no juega (§4): no tiene entidad en el mapa, solo coordina y
+// muestra. La máquina que lo corre observa; para jugar hace falta un cliente.
+package server
+
+import (
+	"fmt"
+	"log"
+	"net"
+	"strings"
+	"sync"
+	"time"
+
+	"ctf/internal/game"
+	"ctf/internal/protocol"
+)
+
+// Options configura el servidor.
+type Options struct {
+	GameID        uint16
+	ServerName    string
+	TCPPort       int
+	Config        game.Config
+	CountdownSecs int
+	MaxPlayers    int
+	AutoStart     int // arrancar al llegar a esta cantidad de jugadores; 0 = manual
+	Logger        *log.Logger
+}
+
+// client es una conexión aceptada. w serializa mensajes hacia ese cliente.
+type client struct {
+	conn     net.Conn
+	playerID uint16
+	name     string
+	mu       sync.Mutex // protege la escritura al socket
+}
+
+func (c *client) send(msg any) error {
+	body, err := protocol.MarshalBinary(msg)
+	if err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return protocol.WriteFrame(c.conn, body)
+}
+
+// Server es una partida.
+type Server struct {
+	opt   Options
+	log   *log.Logger
+	mu    sync.Mutex
+	state uint8
+	world *game.World
+
+	clients map[uint16]*client
+	nextID  uint16
+
+	pendingInteract map[uint16]bool
+
+	ln            net.Listener
+	udp           *net.UDPConn
+	discoveryPort int
+	done          chan struct{}
+	startCh       chan struct{}
+	closeer       sync.Once
+}
+
+func New(opt Options) *Server {
+	if opt.GameID == 0 {
+		opt.GameID = 1
+	}
+	if opt.ServerName == "" {
+		opt.ServerName = "Captura la Bandera"
+	}
+	if opt.TCPPort == 0 {
+		opt.TCPPort = 5000
+	}
+	if opt.CountdownSecs == 0 {
+		opt.CountdownSecs = 5
+	}
+	if opt.MaxPlayers == 0 {
+		opt.MaxPlayers = 100
+	}
+	if opt.Config.MapSize == 0 {
+		opt.Config = game.DefaultConfig()
+	}
+	if opt.Logger == nil {
+		opt.Logger = log.Default()
+	}
+	return &Server{
+		opt:             opt,
+		log:             opt.Logger,
+		state:           protocol.StateWaiting,
+		world:           game.New(opt.Config, nil),
+		clients:         map[uint16]*client{},
+		pendingInteract: map[uint16]bool{},
+		done:            make(chan struct{}),
+		startCh:         make(chan struct{}, 1),
+	}
+}
+
+// Addr devuelve la dirección TCP real (útil si se pidió el puerto 0).
+func (s *Server) Addr() net.Addr { return s.ln.Addr() }
+
+// Listen abre el puerto TCP sin empezar a atender.
+func (s *Server) Listen() error {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", s.opt.TCPPort))
+	if err != nil {
+		return fmt.Errorf("no se pudo abrir el puerto TCP %d: %w", s.opt.TCPPort, err)
+	}
+	s.ln = ln
+	return nil
+}
+
+// Run atiende conexiones y ejecuta la partida completa.
+func (s *Server) Run() {
+	go s.acceptLoop()
+	s.log.Printf("servidor '%s' escuchando en %s (gameId %d)",
+		s.opt.ServerName, s.ln.Addr(), s.opt.GameID)
+	s.log.Printf("esperando jugadores...")
+
+	select {
+	case <-s.startCh:
+	case <-s.done:
+		return
+	}
+
+	s.runCountdown()
+	s.runGame()
+}
+
+// Start dispara el inicio de la partida (lo hace el anfitrión).
+func (s *Server) Start() {
+	select {
+	case s.startCh <- struct{}{}:
+	default:
+	}
+}
+
+// Close cierra el servidor.
+func (s *Server) Close() {
+	s.closeer.Do(func() {
+		close(s.done)
+		s.ln.Close()
+		if s.udp != nil {
+			s.udp.Close()
+		}
+	})
+}
+
+func (s *Server) acceptLoop() {
+	for {
+		conn, err := s.ln.Accept()
+		if err != nil {
+			select {
+			case <-s.done:
+			default:
+				s.log.Printf("accept: %v", err)
+			}
+			return
+		}
+		go s.handleConn(conn)
+	}
+}
+
+func (s *Server) handleConn(conn net.Conn) {
+	defer conn.Close()
+	c := &client{conn: conn}
+	s.log.Printf("conexión nueva desde %s", conn.RemoteAddr())
+
+	for {
+		body, err := protocol.ReadFrame(conn)
+		if err != nil {
+			break
+		}
+		msg, derr := protocol.UnmarshalBinary(body)
+		if derr != nil {
+			c.send(protocol.Error{Code: errorCode(derr), Description: derr.Error()})
+			if derr == protocol.ErrVersion {
+				break // nada de lo que siga servirá
+			}
+			continue
+		}
+		if stop := s.dispatch(c, msg); stop {
+			break
+		}
+	}
+	s.disconnect(c)
+}
+
+func errorCode(err error) uint8 {
+	switch err {
+	case protocol.ErrVersion:
+		return protocol.ErrUnsupportedVersion
+	case protocol.ErrShort, protocol.ErrType:
+		return protocol.ErrInvalidEncoding
+	default:
+		return protocol.ErrInvalidMessage
+	}
+}
+
+// dispatch procesa un mensaje. Devuelve true si hay que cerrar la conexión.
+func (s *Server) dispatch(c *client, msg any) bool {
+	switch m := msg.(type) {
+	case protocol.Join:
+		return !s.handleJoin(c, m)
+	case protocol.Input:
+		s.handleInput(c, m)
+	case protocol.Interact:
+		s.handleInteract(c, m)
+	case protocol.Leave:
+		return true
+	default:
+		c.send(protocol.Error{Code: protocol.ErrInvalidMessage,
+			Description: "este mensaje no va del cliente al servidor"})
+	}
+	return false
+}
+
+func (s *Server) handleJoin(c *client, m protocol.Join) bool {
+	name := strings.TrimSpace(m.Name)
+	if name == "" || len([]rune(name)) > 20 {
+		c.send(protocol.JoinRejected{Reason: protocol.ReasonInvalidName})
+		return false
+	}
+
+	s.mu.Lock()
+	if s.state != protocol.StateWaiting {
+		s.mu.Unlock()
+		c.send(protocol.JoinRejected{Reason: protocol.ReasonGameAlreadyStarted})
+		return false
+	}
+	if len(s.clients) >= s.opt.MaxPlayers {
+		s.mu.Unlock()
+		c.send(protocol.JoinRejected{Reason: protocol.ReasonGameFull})
+		return false
+	}
+	s.nextID++
+	id := s.nextID
+	c.playerID, c.name = id, name
+	s.clients[id] = c
+	s.world.AddPlayer(id, name)
+	count := len(s.clients)
+	s.mu.Unlock()
+
+	c.send(protocol.JoinAccepted{PlayerID: id, GameID: s.opt.GameID})
+	s.mu.Lock()
+	s.broadcastLobbyLocked()
+	s.mu.Unlock()
+
+	s.log.Printf("P%02d entró como %q (%d jugador(es) en el lobby)", id, name, count)
+	if s.opt.AutoStart > 0 && count >= s.opt.AutoStart {
+		s.log.Printf("se alcanzaron %d jugadores: iniciando", s.opt.AutoStart)
+		s.Start()
+	}
+	return true
+}
+
+func (s *Server) handleInput(c *client, m protocol.Input) {
+	if c.playerID == 0 || c.playerID != m.PlayerID {
+		c.send(protocol.Error{Code: protocol.ErrUnknownPlayer,
+			Description: "el playerId no corresponde a esta conexión"})
+		return
+	}
+	if m.Direction > protocol.DirRight {
+		c.send(protocol.Error{Code: protocol.ErrInvalidInput,
+			Description: "dirección fuera de rango"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == protocol.StateRunning {
+		s.world.SetDirection(m.PlayerID, m.Direction)
+	}
+}
+
+func (s *Server) handleInteract(c *client, m protocol.Interact) {
+	if c.playerID == 0 || c.playerID != m.PlayerID {
+		c.send(protocol.Error{Code: protocol.ErrUnknownPlayer,
+			Description: "el playerId no corresponde a esta conexión"})
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state == protocol.StateRunning {
+		s.pendingInteract[m.PlayerID] = true // §12: varios cuentan como uno
+	}
+}
+
+func (s *Server) disconnect(c *client) {
+	if c.playerID == 0 {
+		return
+	}
+	s.mu.Lock()
+	delete(s.clients, c.playerID)
+	s.world.RemovePlayer(c.playerID)
+	delete(s.pendingInteract, c.playerID)
+	s.broadcastLocked(protocol.PlayerDisconnected{PlayerID: c.playerID})
+	if s.state == protocol.StateWaiting {
+		s.broadcastLobbyLocked()
+	}
+	s.mu.Unlock()
+	s.log.Printf("P%02d se desconectó", c.playerID)
+}
+
+func (s *Server) runCountdown() {
+	s.mu.Lock()
+	s.state = protocol.StateStarting
+	s.mu.Unlock()
+	s.log.Printf("iniciando cuenta regresiva (%d s)", s.opt.CountdownSecs)
+
+	for i := s.opt.CountdownSecs; i > 0; i-- {
+		s.mu.Lock()
+		s.broadcastLocked(protocol.GameCountdown{SecondsRemaining: uint8(i)})
+		s.mu.Unlock()
+		select {
+		case <-time.After(time.Second):
+		case <-s.done:
+			return
+		}
+	}
+}
+
+func (s *Server) runGame() {
+	s.mu.Lock()
+	s.world.SpawnAll()
+	s.state = protocol.StateRunning
+	cfg := s.opt.Config
+	s.broadcastLocked(protocol.GameStarted{
+		MapSize: cfg.MapSize, CircleRadius: cfg.CircleRadius, PlayerRadius: cfg.PlayerRadius,
+		PlayerSpeed: cfg.PlayerSpeed, InteractionRadius: cfg.InteractionRadius,
+		TickIntervalMs: uint16(cfg.TickIntervalMs),
+		Flag:           s.flagLocked(), Players: s.playersFullLocked(),
+	})
+	s.mu.Unlock()
+	s.log.Printf("¡partida iniciada! %d jugadores en el mapa", len(s.clients))
+
+	ticker := time.NewTicker(time.Duration(cfg.TickIntervalMs) * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			if s.tick() {
+				s.log.Printf("partida terminada")
+				return
+			}
+		}
+	}
+}
+
+// tick ejecuta un ciclo y difunde el resultado. Devuelve true si terminó.
+func (s *Server) tick() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	interacts := s.pendingInteract
+	s.pendingInteract = map[uint16]bool{}
+	ev := s.world.Step(interacts)
+
+	// §29.11: primero los eventos, después el estado.
+	for _, id := range ev.PickedUp {
+		s.broadcastLocked(protocol.FlagPickedUp{Tick: s.world.Tick, PlayerID: id})
+		s.log.Printf("tick %d: P%02d tomó la bandera", s.world.Tick, id)
+	}
+	for _, st := range ev.Stolen {
+		s.broadcastLocked(protocol.FlagStolen{Tick: s.world.Tick,
+			PreviousCarrierID: st.Previous, NewCarrierID: st.New})
+		s.log.Printf("tick %d: P%02d le robó la bandera a P%02d", s.world.Tick, st.New, st.Previous)
+	}
+	s.broadcastLocked(protocol.GameState{
+		Tick: s.world.Tick, Flag: s.flagLocked(), Players: s.playersCompactLocked(),
+	})
+
+	if ev.Winner != 0 {
+		p := s.world.Player(ev.Winner)
+		name := fmt.Sprintf("P%02d", ev.Winner)
+		if p != nil {
+			name = p.Name
+		}
+		s.state = protocol.StateFinished
+		s.broadcastLocked(protocol.GameOver{WinnerID: ev.Winner, WinnerName: name, Reason: 0x01})
+		s.log.Printf("tick %d: ¡ganó %s!", s.world.Tick, name)
+		return true
+	}
+	return false
+}
+
+// ---------- difusión (asumen el mutex tomado) ----------
+
+func (s *Server) broadcastLocked(msg any) {
+	for _, c := range s.clients {
+		if err := c.send(msg); err != nil {
+			s.log.Printf("no se pudo escribir a P%02d: %v", c.playerID, err)
+		}
+	}
+}
+
+func (s *Server) broadcastLobbyLocked() {
+	players := make([]protocol.LobbyPlayer, 0, len(s.clients))
+	for _, p := range s.world.Players() {
+		players = append(players, protocol.LobbyPlayer{ID: p.ID, Name: p.Name})
+	}
+	s.broadcastLocked(protocol.LobbyState{State: s.state, Players: players})
+}
+
+func (s *Server) playersFullLocked() []protocol.Player {
+	ps := s.world.Players()
+	out := make([]protocol.Player, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, protocol.Player{ID: p.ID, Name: p.Name, X: p.X, Y: p.Y,
+			Direction: p.Direction, HasFlag: s.world.HasFlag(p.ID)})
+	}
+	return out
+}
+
+func (s *Server) playersCompactLocked() []protocol.Player {
+	ps := s.world.Players()
+	out := make([]protocol.Player, 0, len(ps))
+	for _, p := range ps {
+		out = append(out, protocol.Player{ID: p.ID, X: p.X, Y: p.Y,
+			Direction: p.Direction, HasFlag: s.world.HasFlag(p.ID)})
+	}
+	return out
+}
+
+func (s *Server) flagLocked() protocol.Flag {
+	f := s.world.Flag
+	return protocol.Flag{Status: f.Status, X: f.X, Y: f.Y, Carrier: f.Carrier}
+}
