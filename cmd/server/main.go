@@ -16,10 +16,12 @@
 package main
 
 import (
+	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"ctf/internal/game"
@@ -30,7 +32,8 @@ func main() {
 	port := flag.Int("port", 5000, "puerto TCP")
 	dport := flag.Int("discovery-port", 5001, "puerto UDP del descubrimiento")
 	name := flag.String("name", "Partida de prueba", "nombre del servidor")
-	autostart := flag.Int("autostart", 0, "arrancar al llegar a esta cantidad de jugadores (0 = con Enter)")
+	autostart := flag.Int("autostart", 0, "opcional: arrancar solo al llegar a N jugadores (0 = manual con 'start')")
+	maxPlayers := flag.Int("max", 100, "máximo de jugadores admitidos")
 	small := flag.Bool("small", false, "usar el mundo chico y rápido de las demos")
 	flag.Parse()
 
@@ -46,6 +49,7 @@ func main() {
 		Config:        cfg,
 		CountdownSecs: 3,
 		AutoStart:     *autostart,
+		MaxPlayers:    *maxPlayers,
 	})
 	if err := s.Listen(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -57,12 +61,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "aviso:", err, "— se podrá conectar por IP manual")
 	}
 
-	// Con -autostart la partida arranca sola; sin él, el anfitrión presiona Enter.
+	// Con -autostart la partida arranca sola al llegar a N jugadores. Sin él, el
+	// anfitrión la inicia cuando quiera, con la gente que haya: acá se escribe
+	// 'start' en la terminal, o se toca el botón Start en la interfaz de quien
+	// entró primero.
 	if *autostart == 0 {
 		go func() {
-			fmt.Println(">>> Presioná Enter para iniciar la partida <<<")
-			fmt.Scanln()
-			s.Start()
+			fmt.Println(">>> Escribí 'start' y Enter para iniciar la partida (con los jugadores que haya) <<<")
+			sc := bufio.NewScanner(os.Stdin)
+			for sc.Scan() {
+				switch strings.TrimSpace(strings.ToLower(sc.Text())) {
+				case "start", "s", "":
+					s.Start()
+					return
+				default:
+					fmt.Println("(escribí 'start' para iniciar)")
+				}
+			}
 		}()
 	}
 
