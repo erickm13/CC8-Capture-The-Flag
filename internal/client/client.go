@@ -172,6 +172,7 @@ func (c *Cliente) enviar(msg any) error {
 	if err != nil {
 		return err
 	}
+	protocol.LogEnviado("cliente", body)
 	return protocol.WriteFrame(c.conn, body)
 }
 
@@ -188,6 +189,7 @@ func (c *Cliente) leer(aceptado chan<- error) {
 			}
 			return
 		}
+		protocol.LogRecibido("cliente", body)
 		msg, err := protocol.UnmarshalBinary(body)
 		if err != nil {
 			continue // un mensaje ilegible no debe tumbar al cliente

@@ -25,6 +25,7 @@ import (
 	"syscall"
 
 	"ctf/internal/game"
+	"ctf/internal/protocol"
 	"ctf/internal/server"
 )
 
@@ -34,8 +35,17 @@ func main() {
 	name := flag.String("name", "Partida de prueba", "nombre del servidor")
 	autostart := flag.Int("autostart", 0, "opcional: arrancar solo al llegar a N jugadores (0 = manual con 'start')")
 	maxPlayers := flag.Int("max", 100, "máximo de jugadores admitidos")
+	postgame := flag.Int("postgame", 5, "segundos que se muestra el resultado antes de volver al lobby")
 	small := flag.Bool("small", false, "usar el mundo chico y rápido de las demos")
+	debug := flag.Bool("debug", false, "mostrar cada mensaje en hex con desglose byte por byte")
+	save := flag.Bool("save", false, "guardar el log de cada partida en un archivo (carpeta logs/)")
 	flag.Parse()
+
+	protocol.DebugActivo = *debug
+	if *save {
+		protocol.IniciarGuardado("servidor")
+		defer protocol.CerrarGuardado()
+	}
 
 	cfg := game.DefaultConfig()
 	if *small {
@@ -48,6 +58,7 @@ func main() {
 		TCPPort:       *port,
 		Config:        cfg,
 		CountdownSecs: 3,
+		PostGameSecs:  *postgame,
 		AutoStart:     *autostart,
 		MaxPlayers:    *maxPlayers,
 	})
@@ -74,6 +85,7 @@ func main() {
 					fmt.Println(">>> recibí 'start', iniciando...")
 					s.Start()
 				case "salir", "quit", "exit":
+					protocol.CerrarGuardado()
 					s.Close()
 					os.Exit(0)
 				default:
@@ -91,7 +103,7 @@ func main() {
 	// Cerrar limpio con Ctrl-C.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
-	go func() { <-sig; fmt.Println("\ncerrando..."); s.Close(); os.Exit(0) }()
+	go func() { <-sig; fmt.Println("\ncerrando..."); protocol.CerrarGuardado(); s.Close(); os.Exit(0) }()
 
 	s.Run()
 }

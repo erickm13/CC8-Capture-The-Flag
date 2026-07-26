@@ -30,7 +30,15 @@ func main() {
 	addr := flag.String("addr", "", "dirección del servidor; vacío = descubrir")
 	dport := flag.Int("discovery-port", 5001, "puerto UDP del descubrimiento")
 	name := flag.String("name", "bot", "nombre del jugador")
+	debug := flag.Bool("debug", false, "mostrar cada mensaje en hex con desglose byte por byte")
+	save := flag.Bool("save", false, "guardar el log de cada partida en un archivo (carpeta logs/)")
 	flag.Parse()
+
+	protocol.DebugActivo = *debug
+	if *save {
+		protocol.IniciarGuardado("cliente")
+		defer protocol.CerrarGuardado()
+	}
 
 	destino := *addr
 	if destino == "" {

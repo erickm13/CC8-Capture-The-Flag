@@ -47,6 +47,7 @@ func (c *client) send(msg any) error {
 	if err != nil {
 		return err
 	}
+	protocol.LogEnviado("servidor", body)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return protocol.WriteFrame(c.conn, body)
@@ -243,6 +244,7 @@ func (s *Server) handleConn(conn net.Conn) {
 		if err != nil {
 			break
 		}
+		protocol.LogRecibido("servidor", body)
 		msg, derr := protocol.UnmarshalBinary(body)
 		if derr != nil {
 			c.send(protocol.Error{Code: errorCode(derr), Description: derr.Error()})

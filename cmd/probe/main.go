@@ -27,7 +27,10 @@ func main() {
 	addr := flag.String("addr", "", "dirección del servidor; vacío = descubrir")
 	dport := flag.Int("discovery-port", 5001, "puerto UDP del descubrimiento")
 	name := flag.String("name", "sonda-§35", "nombre para el JOIN")
+	debug := flag.Bool("debug", false, "mostrar cada mensaje en hex con desglose byte por byte")
 	flag.Parse()
+
+	protocol.DebugActivo = *debug
 
 	fmt.Println("=== Prueba mínima de compatibilidad (§35) ===")
 	fmt.Println()
@@ -209,6 +212,7 @@ func (p *prueba) esperar(conn net.Conn, tipos ...uint8) any {
 		if err != nil {
 			return nil
 		}
+		protocol.LogRecibido("sonda", body)
 		if len(body) < 1 || !quiere[body[0]] {
 			continue
 		}
@@ -256,5 +260,6 @@ func enviar(conn net.Conn, msg any) {
 	if err != nil {
 		return
 	}
+	protocol.LogEnviado("sonda", body)
 	protocol.WriteFrame(conn, body)
 }
