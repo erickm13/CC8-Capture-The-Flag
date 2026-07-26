@@ -28,6 +28,7 @@ type Options struct {
 	TCPPort       int
 	Config        game.Config
 	CountdownSecs int
+	PostGameSecs  int // segundos que se muestra el GAME_OVER antes de volver al lobby
 	MaxPlayers    int
 	AutoStart     int // opcional: arrancar solo al llegar a N jugadores; 0 = manual (comando/botón start)
 	Logger        *log.Logger
@@ -84,6 +85,9 @@ func New(opt Options) *Server {
 	}
 	if opt.CountdownSecs == 0 {
 		opt.CountdownSecs = 5
+	}
+	if opt.PostGameSecs == 0 {
+		opt.PostGameSecs = 5
 	}
 	if opt.MaxPlayers == 0 {
 		opt.MaxPlayers = 100
@@ -160,6 +164,20 @@ func (s *Server) Run() {
 			return
 		default:
 		}
+
+		// Pausa antes de volver al lobby: mantiene el estado FINISHED (y el
+		// GAME_OVER en pantalla) un rato, para que TODOS los clientes alcancen a
+		// mostrar quién ganó. Sin esta pausa, el LOBBY_STATE llegaría pegado al
+		// GAME_OVER y algunos clientes borrarían el cartel de victoria antes de
+		// que se viera. El protocolo no fija este tiempo, así que lo elegimos
+		// generoso para máxima compatibilidad.
+		s.log.Printf("mostrando el resultado por %d s...", s.opt.PostGameSecs)
+		select {
+		case <-time.After(time.Duration(s.opt.PostGameSecs) * time.Second):
+		case <-s.done:
+			return
+		}
+
 		s.volverAlLobby()
 	}
 }
