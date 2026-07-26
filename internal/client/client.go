@@ -60,10 +60,10 @@ func (s Snapshot) Portador() *protocol.Player {
 
 // Eventos avisa de hechos puntuales, para sonido o animación. Todos opcionales.
 type Eventos struct {
-	AlTomar        func(tick uint32, id uint16)
-	AlRobar        func(tick uint32, previo, nuevo uint16)
-	AlDesconectar  func(id uint16)
-	AlTerminar     func(ganadorID uint16, nombre string)
+	AlTomar       func(tick uint32, id uint16)
+	AlRobar       func(tick uint32, previo, nuevo uint16)
+	AlDesconectar func(id uint16)
+	AlTerminar    func(ganadorID uint16, nombre string)
 }
 
 // Cliente es una conexión a un servidor.
@@ -211,6 +211,13 @@ func (c *Cliente) leer(aceptado chan<- error) {
 		case protocol.LobbyState:
 			c.mu.Lock()
 			c.snap.Estado, c.snap.Lobby = m.State, m.Players
+			// Volver al lobby (por ejemplo tras una partida) limpia el resultado
+			// y el estado de juego anterior, para que la interfaz muestre la
+			// sala de espera sin residuos de la partida que terminó.
+			c.snap.GanadorID, c.snap.Ganador = 0, ""
+			c.snap.Tick = 0
+			c.snap.Jugadores = nil
+			c.lastTick = 0
 			c.mu.Unlock()
 		case protocol.GameCountdown:
 			c.mu.Lock()
@@ -221,6 +228,10 @@ func (c *Cliente) leer(aceptado chan<- error) {
 			c.snap.Estado, c.snap.Config = protocol.StateRunning, m
 			c.snap.Jugadores, c.snap.Bandera = m.Players, m.Flag
 			c.mu.Unlock()
+			// Cada partida empieza en tick 1, así que reiniciamos el filtro de
+			// estados viejos; si no, los estados de la nueva partida (ticks
+			// bajos) se descartarían por ser menores al último de la anterior.
+			c.lastTick = 0
 		case protocol.GameState:
 			if m.Tick <= c.lastTick { // §31: ignorar estados viejos
 				continue
@@ -249,7 +260,8 @@ func (c *Cliente) leer(aceptado chan<- error) {
 			if c.ev.AlTerminar != nil {
 				c.ev.AlTerminar(m.WinnerID, m.WinnerName)
 			}
-			return
+			// No cerramos: el servidor sigue vivo y nos mandará un LOBBY_STATE
+			// para la próxima partida. Seguimos escuchando.
 		}
 	}
 }

@@ -61,22 +61,29 @@ func main() {
 		fmt.Fprintln(os.Stderr, "aviso:", err, "— se podrá conectar por IP manual")
 	}
 
-	// Con -autostart la partida arranca sola al llegar a N jugadores. Sin él, el
-	// anfitrión la inicia cuando quiera, con la gente que haya: acá se escribe
-	// 'start' en la terminal, o se toca el botón Start en la interfaz de quien
-	// entró primero.
+	// Sin -autostart, el anfitrión inicia cada partida escribiendo 'start' en
+	// esta terminal. El lector sigue activo entre partidas.
 	if *autostart == 0 {
 		go func() {
 			fmt.Println(">>> Escribí 'start' y Enter para iniciar la partida (con los jugadores que haya) <<<")
 			sc := bufio.NewScanner(os.Stdin)
 			for sc.Scan() {
-				switch strings.TrimSpace(strings.ToLower(sc.Text())) {
+				linea := strings.TrimSpace(strings.ToLower(sc.Text()))
+				switch linea {
 				case "start", "s", "":
+					fmt.Println(">>> recibí 'start', iniciando...")
 					s.Start()
-					return
+				case "salir", "quit", "exit":
+					s.Close()
+					os.Exit(0)
 				default:
-					fmt.Println("(escribí 'start' para iniciar)")
+					fmt.Printf(">>> no entendí %q. Escribí 'start' para iniciar.\n", linea)
 				}
+			}
+			// Si el scanner termina (stdin cerrado), avisamos: sin esto, la
+			// terminal quedaría muda y parecería que 'start' no funciona.
+			if err := sc.Err(); err != nil {
+				fmt.Fprintln(os.Stderr, "lector de comandos terminó:", err)
 			}
 		}()
 	}

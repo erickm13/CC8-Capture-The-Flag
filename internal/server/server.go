@@ -29,7 +29,7 @@ type Options struct {
 	Config        game.Config
 	CountdownSecs int
 	MaxPlayers    int
-	AutoStart     int // arrancar al llegar a esta cantidad de jugadores; 0 = manual
+	AutoStart     int // opcional: arrancar solo al llegar a N jugadores; 0 = manual (comando/botón start)
 	Logger        *log.Logger
 }
 
@@ -109,6 +109,14 @@ func New(opt Options) *Server {
 // Addr devuelve la dirección TCP real (útil si se pidió el puerto 0).
 func (s *Server) Addr() net.Addr { return s.ln.Addr() }
 
+// Estado devuelve el estado actual del servidor (WAITING, RUNNING, etc.), de
+// forma segura para otras goroutines.
+func (s *Server) Estado() uint8 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.state
+}
+
 // Listen abre el puerto TCP sin empezar a atender.
 func (s *Server) Listen() error {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", s.opt.TCPPort))
@@ -119,28 +127,65 @@ func (s *Server) Listen() error {
 	return nil
 }
 
-// Run atiende conexiones y ejecuta la partida completa.
+// Run atiende conexiones y ejecuta partidas en bucle: cuando una termina, el
+// servidor vuelve al lobby y espera otro 'start' para la siguiente. Así se
+// pueden jugar varias partidas sin reiniciar el proceso ni reconectar.
 func (s *Server) Run() {
 	go s.acceptLoop()
 	s.log.Printf("servidor '%s' escuchando en %s (gameId %d)",
 		s.opt.ServerName, s.ln.Addr(), s.opt.GameID)
 	s.log.Printf("esperando jugadores...")
 
-	select {
-	case <-s.startCh:
-	case <-s.done:
-		return
-	}
+	for {
+		// Esperar la orden de inicio. startCh tiene capacidad 1, así que un
+		// 'start' escrito en cualquier momento (incluso durante la partida
+		// anterior) queda encolado y arranca la siguiente en cuanto Run vuelve
+		// a esperar aquí. No lo vaciamos en ningún lado: eso evitaba un arranque
+		// de más, pero causaba que se perdiera el 'start' legítimo del anfitrión
+		// al volver al lobby (una carrera de milisegundos). Es preferible que un
+		// 'start' nunca se pierda a que ocasionalmente sobre uno.
+		select {
+		case <-s.startCh:
+		case <-s.done:
+			return
+		}
 
-	s.runCountdown()
-	s.runGame()
+		s.runCountdown()
+		s.runGame()
+
+		// La partida terminó. Si el servidor no se está cerrando, volvemos al
+		// lobby para poder jugar otra.
+		select {
+		case <-s.done:
+			return
+		default:
+		}
+		s.volverAlLobby()
+	}
 }
 
-// Start dispara el inicio de la partida (lo hace el anfitrión).
+// volverAlLobby resetea el mundo y deja el servidor listo para otra partida.
+func (s *Server) volverAlLobby() {
+	s.mu.Lock()
+	s.world.Reiniciar()
+	s.state = protocol.StateWaiting
+	s.pendingInteract = map[uint16]bool{}
+	s.broadcastLobbyLocked()
+	jugadores := len(s.clients)
+	s.mu.Unlock()
+
+	s.log.Printf("de vuelta en el lobby con %d jugador(es). Escribí 'start' para otra partida.", jugadores)
+}
+
+// Start dispara el inicio de la partida (lo hace el anfitrión). Encola la señal
+// en startCh; el bucle Run la recoge solo cuando está esperando en el lobby, así
+// que un start mandado durante una partida en curso simplemente queda listo para
+// la siguiente vez que Run vuelva a esperar (o se descarta si ya hay uno).
 func (s *Server) Start() {
 	select {
 	case s.startCh <- struct{}{}:
 	default:
+		// Ya había una señal encolada: no hace falta otra.
 	}
 }
 
@@ -256,8 +301,10 @@ func (s *Server) handleJoin(c *client, m protocol.Join) bool {
 	s.mu.Unlock()
 
 	s.log.Printf("P%02d entró como %q (%d jugador(es) en el lobby)", id, name, count)
+	// AutoStart es opcional: si se configuró, la partida arranca sola al llegar
+	// a N jugadores. Por defecto es 0, y la inicia el anfitrión con 'start'.
 	if s.opt.AutoStart > 0 && count >= s.opt.AutoStart {
-		s.log.Printf("se alcanzaron %d jugadores: iniciando", s.opt.AutoStart)
+		s.log.Printf("se alcanzaron %d jugadores: iniciando automáticamente", s.opt.AutoStart)
 		s.Start()
 	}
 	return true

@@ -199,6 +199,21 @@ func (w *World) SpawnAll() {
 	}
 }
 
+// Reiniciar deja el mundo listo para una nueva partida sin perder a los
+// jugadores conectados. Devuelve la bandera al centro, borra el ganador, pone el
+// tick en cero y limpia el estado interno de cada jugador (si entró al círculo,
+// si lleva la bandera). No reposiciona: eso lo hace SpawnAll al arrancar.
+func (w *World) Reiniciar() {
+	w.Tick = 0
+	w.winner = 0
+	w.Flag = Flag{Status: FlagAvailable, X: 0, Y: 0}
+	for _, p := range w.players {
+		p.HasFlag = false
+		p.Direction = DirNone
+		p.enteredCircle = false
+	}
+}
+
 // SetDirection registra la dirección activa de un jugador (§10). Una dirección
 // fuera de rango se ignora, que es lo más seguro.
 func (w *World) SetDirection(id uint16, dir uint8) {
