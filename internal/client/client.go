@@ -33,6 +33,19 @@ type Snapshot struct {
 	Countdown uint8
 	GanadorID uint16
 	Ganador   string
+	Nombres   map[uint16]string // playerId → nombre, recibidos en GAME_STARTED/LOBBY_STATE
+}
+
+// Nombre devuelve el nombre de un jugador por su ID. El GAME_STATE no trae
+// nombres (§29.6), así que se buscan en la tabla que se llenó al recibir
+// GAME_STARTED o LOBBY_STATE. Si no se conoce, cae en "P01" como respaldo.
+func (s Snapshot) Nombre(id uint16) string {
+	if s.Nombres != nil {
+		if n, ok := s.Nombres[id]; ok && n != "" {
+			return n
+		}
+	}
+	return fmt.Sprintf("P%02d", id)
 }
 
 // Yo devuelve el jugador propio dentro del snapshot, o nil si no está.
@@ -117,6 +130,14 @@ func (c *Cliente) Snapshot() Snapshot {
 	s := c.snap
 	s.Jugadores = append([]protocol.Player(nil), c.snap.Jugadores...)
 	s.Lobby = append([]protocol.LobbyPlayer(nil), c.snap.Lobby...)
+	// Copiar el mapa de nombres para que quien lea el snapshot no comparta el
+	// mapa interno (que otra goroutine podría modificar).
+	if c.snap.Nombres != nil {
+		s.Nombres = make(map[uint16]string, len(c.snap.Nombres))
+		for k, v := range c.snap.Nombres {
+			s.Nombres[k] = v
+		}
+	}
 	return s
 }
 
@@ -213,6 +234,14 @@ func (c *Cliente) leer(aceptado chan<- error) {
 		case protocol.LobbyState:
 			c.mu.Lock()
 			c.snap.Estado, c.snap.Lobby = m.State, m.Players
+			// Guardar los nombres por playerId, para dibujarlos durante la
+			// partida (el GAME_STATE no los trae, §29.6).
+			if c.snap.Nombres == nil {
+				c.snap.Nombres = map[uint16]string{}
+			}
+			for _, p := range m.Players {
+				c.snap.Nombres[p.ID] = p.Name
+			}
 			// Volver al lobby (por ejemplo tras una partida) limpia el resultado
 			// y el estado de juego anterior, para que la interfaz muestre la
 			// sala de espera sin residuos de la partida que terminó.
@@ -229,6 +258,14 @@ func (c *Cliente) leer(aceptado chan<- error) {
 			c.mu.Lock()
 			c.snap.Estado, c.snap.Config = protocol.StateRunning, m
 			c.snap.Jugadores, c.snap.Bandera = m.Players, m.Flag
+			// GAME_STARTED sí trae los nombres; los guardamos para el resto de
+			// la partida, donde los GAME_STATE ya no los incluyen (§29.6).
+			if c.snap.Nombres == nil {
+				c.snap.Nombres = map[uint16]string{}
+			}
+			for _, p := range m.Players {
+				c.snap.Nombres[p.ID] = p.Name
+			}
 			c.mu.Unlock()
 			// Cada partida empieza en tick 1, así que reiniciamos el filtro de
 			// estados viejos; si no, los estados de la nueva partida (ticks

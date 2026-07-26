@@ -204,10 +204,10 @@ func (g *Juego) Draw(pantalla *ebiten.Image) {
 
 		// El nombre encima. En GAME_STATE no viene el nombre, pero el propio
 		// jugador sabe el suyo; los demás se muestran como P01, P02...
-		etiqueta := fmt.Sprintf("P%02d", p.ID)
-		if p.ID == s.MiID {
-			etiqueta = g.nombre
-		}
+		// El nombre encima de cada jugador. Los nombres se recibieron en
+		// GAME_STARTED/LOBBY_STATE; el GAME_STATE no los trae (§29.6). Nombre()
+		// los busca por ID y cae en "P01" solo si no lo conoce.
+		etiqueta := s.Nombre(p.ID)
 		ebitenutil.DebugPrintAt(pantalla, etiqueta, int(px)-10, int(py)-int(radio)-16)
 	}
 
@@ -240,7 +240,7 @@ func (g *Juego) dibujarHUD(pantalla *ebiten.Image, s client.Snapshot) {
 	estado := "bandera libre"
 	switch s.Bandera.Status {
 	case protocol.FlagCarried:
-		estado = fmt.Sprintf("la lleva P%02d", s.Bandera.Carrier)
+		estado = fmt.Sprintf("la lleva %s", s.Nombre(s.Bandera.Carrier))
 	case protocol.FlagDropped:
 		estado = "bandera caída"
 	}
