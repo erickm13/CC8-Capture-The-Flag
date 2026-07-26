@@ -43,20 +43,22 @@ func main() {
 
 	destino := *addr
 
-	// Si no se dio -addr, elegir un servidor. Dos vías:
-	//   -menu terminal (por defecto): lista numerada en la consola
-	//   -menu ventana: pantalla de selección dentro de la ventana del juego
+	// Modo ventana: la selección de servidor ocurre DENTRO de la ventana del
+	// juego, sin abrir ni cerrar ventanas extra. Arrancamos la interfaz en modo
+	// selección y ella misma conecta al elegir.
 	if destino == "" && *menu == "ventana" {
-		// La selección gráfica la maneja la interfaz: le pasamos un escáner y
-		// la ventana muestra la lista hasta que el jugador elija. Conectamos
-		// después, ya adentro de la interfaz.
-		elegido := ui.ElegirServidorEnVentana(*dport, *name)
-		if elegido == "" {
-			fmt.Println("no se eligió ningún servidor.")
-			return
+		juego := ui.NuevoConSeleccion(*name, *dport)
+		ebiten.SetWindowSize(ui.Ancho, ui.Alto)
+		ebiten.SetWindowTitle("Captura la Bandera — " + *name)
+		if err := ebiten.RunGame(juego); err != nil && err.Error() != "cerrar ventana" {
+			fmt.Fprintln(os.Stderr, "error de la interfaz:", err)
+			os.Exit(1)
 		}
-		destino = elegido
-	} else if destino == "" {
+		return
+	}
+
+	// Modo terminal: elegir por número en la consola, después abrir la ventana.
+	if destino == "" {
 		destino = elegirServidorEnTerminal(*dport)
 		if destino == "" {
 			fmt.Println("no se eligió ningún servidor.")
@@ -64,7 +66,8 @@ func main() {
 		}
 	}
 
-	// Conectar. Los eventos se imprimen en la terminal además de dibujarse.
+	// Conectar (para -addr o selección por terminal). Los eventos se imprimen en
+	// la terminal además de dibujarse.
 	cli, err := client.Conectar(destino, *name, client.Eventos{
 		AlTomar:    func(t uint32, id uint16) { fmt.Printf("P%02d tomó la bandera (tick %d)\n", id, t) },
 		AlRobar:    func(t uint32, p, n uint16) { fmt.Printf("P%02d le robó a P%02d\n", n, p) },

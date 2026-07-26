@@ -12,8 +12,10 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"time"
 
 	"ctf/internal/client"
+	"ctf/internal/discovery"
 	"ctf/internal/protocol"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -27,24 +29,68 @@ const (
 	Alto  = 800
 )
 
+// modo indica qué pantalla muestra la ventana en cada momento.
+type modo int
+
+const (
+	modoSeleccion modo = iota // eligiendo servidor de la lista
+	modoJuego                 // conectado y jugando
+	modoError                 // no se pudo conectar; muestra el mensaje
+)
+
 // Juego implementa la interfaz ebiten.Game: Update (lógica por cuadro), Draw
 // (dibujo) y Layout (tamaño). Ebitengine llama Update y Draw ~60 veces por
 // segundo.
+//
+// Una sola ventana maneja las dos pantallas (selección y juego) cambiando de
+// modo. Es importante NO cerrar y reabrir la ventana: Ebitengine no permite
+// llamar a RunGame dos veces en el mismo proceso.
 type Juego struct {
-	cli    *client.Cliente
 	nombre string
+
+	// Estado del juego (modo jugando).
+	cli                *client.Cliente
 	teclaInteractAntes bool
+
+	// Estado de la selección (modo seleccionando).
+	m          modo
+	esc        *discovery.Escáner
+	dport      int
+	filas      []discovery.Servidor
+	mouseAntes bool
+	errMsg     string
 }
 
-// Nuevo crea la interfaz atada a un cliente ya conectado.
+// Nuevo crea la interfaz con un cliente ya conectado (arranca jugando). Se usa
+// cuando el servidor se eligió por terminal o con -addr.
 func Nuevo(cli *client.Cliente, nombre string) *Juego {
-	return &Juego{cli: cli, nombre: nombre}
+	return &Juego{cli: cli, nombre: nombre, m: modoJuego}
+}
+
+// NuevoConSeleccion crea la interfaz arrancando en la pantalla de selección de
+// servidores. La conexión se hace adentro, al elegir, así la ventana nunca se
+// cierra ni se reabre.
+func NuevoConSeleccion(nombre string, dport int) *Juego {
+	esc := discovery.NuevoEscáner(dport, 1200*time.Millisecond, 2*time.Second)
+	esc.Iniciar()
+	return &Juego{nombre: nombre, m: modoSeleccion, esc: esc, dport: dport}
 }
 
 // Update se llama una vez por cuadro. Aquí leemos el teclado y se lo mandamos al
 // servidor a través del cliente. No calculamos posiciones: eso lo hace el
 // servidor y nos llega en el Snapshot.
 func (g *Juego) Update() error {
+	// En modo selección, la ventana muestra la lista y espera un clic.
+	if g.m == modoSeleccion {
+		return g.updateSeleccion()
+	}
+	if g.m == modoError {
+		if ebiten.IsKeyPressed(ebiten.KeyEscape) {
+			return errCerrar
+		}
+		return nil
+	}
+
 	s := g.cli.Snapshot()
 
 	// Si la partida terminó o nos desconectamos, cerrar la ventana.
@@ -90,6 +136,18 @@ func (g *Juego) Update() error {
 // Draw dibuja todo el cuadro. Se llama después de Update.
 func (g *Juego) Draw(pantalla *ebiten.Image) {
 	pantalla.Fill(color.RGBA{18, 18, 24, 255}) // fondo oscuro
+
+	// Despachar según la pantalla actual.
+	if g.m == modoSeleccion {
+		g.drawSeleccion(pantalla)
+		return
+	}
+	if g.m == modoError {
+		ebitenutil.DebugPrintAt(pantalla, "No se pudo conectar al servidor:", 40, 60)
+		ebitenutil.DebugPrintAt(pantalla, g.errMsg, 40, 84)
+		ebitenutil.DebugPrintAt(pantalla, "Escape para salir.", 40, 120)
+		return
+	}
 
 	s := g.cli.Snapshot()
 
@@ -175,7 +233,7 @@ func (g *Juego) dibujarLobby(pantalla *ebiten.Image, s client.Snapshot) {
 		ebitenutil.DebugPrintAt(pantalla, linea, 40, y)
 		y += 20
 	}
-	ebitenutil.DebugPrintAt(pantalla, "Esperando a que el anfitrión inicie...", 40, Alto-40)
+	ebitenutil.DebugPrintAt(pantalla, "Esperando a que el anfitrión inicie la partida...", 40, Alto-40)
 }
 
 func (g *Juego) dibujarHUD(pantalla *ebiten.Image, s client.Snapshot) {
@@ -215,3 +273,95 @@ func colorJugador(id uint16, soyYo bool) color.Color {
 
 // Layout fija el tamaño lógico de la pantalla.
 func (g *Juego) Layout(anchoExt, altoExt int) (int, int) { return Ancho, Alto }
+
+// errCerrar cierra la ventana de forma controlada (Ebitengine termina RunGame).
+var errCerrar = fmt.Errorf("cerrar ventana")
+
+// --------- pantalla de selección de servidores (modo modoSeleccion) ---------
+
+const (
+	selFilaAltura = 40
+	selFilaY0     = 120
+	selFilaX      = 40
+	selFilaAncho  = Ancho - 80
+)
+
+// updateSeleccion maneja el clic sobre un servidor. Al elegir, conecta y cambia
+// a modo juego en la MISMA ventana (no se abre otra).
+func (g *Juego) updateSeleccion() error {
+	if ebiten.IsKeyPressed(ebiten.KeyEscape) {
+		return errCerrar
+	}
+	apretado := ebiten.IsMouseButtonPressed(ebiten.MouseButtonLeft)
+	if apretado && !g.mouseAntes {
+		_, my := ebiten.CursorPosition()
+		for i := range g.filas {
+			y := selFilaY0 + i*selFilaAltura
+			if my >= y && my < y+selFilaAltura-6 {
+				g.conectarA(g.filas[i].Addr())
+				break
+			}
+		}
+	}
+	g.mouseAntes = apretado
+	return nil
+}
+
+// conectarA intenta conectarse al servidor elegido y pasa a modo juego. Si falla,
+// pasa a modo error. En ningún caso cierra la ventana.
+func (g *Juego) conectarA(addr string) {
+	cli, err := client.Conectar(addr, g.nombre, client.Eventos{})
+	if err != nil {
+		g.errMsg = err.Error()
+		g.m = modoError
+		return
+	}
+	if g.esc != nil {
+		g.esc.Detener() // ya no necesitamos seguir escaneando
+		g.esc = nil
+	}
+	g.cli = cli
+	g.m = modoJuego
+}
+
+func (g *Juego) drawSeleccion(pantalla *ebiten.Image) {
+	ebitenutil.DebugPrintAt(pantalla, "CAPTURA LA BANDERA", selFilaX, 30)
+	ebitenutil.DebugPrintAt(pantalla, "Elegí un servidor (clic). La lista se actualiza sola. Escape para salir.", selFilaX, 60)
+	ebitenutil.DebugPrintAt(pantalla, fmt.Sprintf("Jugás como: %s", g.nombre), selFilaX, 84)
+
+	if g.esc != nil {
+		g.filas = g.esc.Lista()
+	}
+	if len(g.filas) == 0 {
+		ebitenutil.DebugPrintAt(pantalla, "Buscando servidores en la red...", selFilaX, selFilaY0)
+		return
+	}
+
+	mx, my := ebiten.CursorPosition()
+	for i, sv := range g.filas {
+		y := selFilaY0 + i*selFilaAltura
+		encima := mx >= selFilaX && mx <= selFilaX+selFilaAncho && my >= y && my < y+selFilaAltura-6
+
+		fondo := color.RGBA{34, 34, 44, 255}
+		if encima {
+			fondo = color.RGBA{50, 90, 70, 255}
+		}
+		vector.DrawFilledRect(pantalla, float32(selFilaX), float32(y),
+			float32(selFilaAncho), float32(selFilaAltura-6), fondo, true)
+
+		estado := "esperando"
+		if sv.State == protocol.StateRunning {
+			estado = "jugando"
+		}
+		linea := fmt.Sprintf("%-20s  %-22s  %s  %d/%d",
+			recortarUI(sv.ServerName, 20), sv.Addr(), estado, sv.PlayerCount, sv.MaximumPlayers)
+		ebitenutil.DebugPrintAt(pantalla, linea, selFilaX+10, y+12)
+	}
+}
+
+func recortarUI(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n-1] + "…"
+}
