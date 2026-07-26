@@ -112,6 +112,7 @@ func jugar(c *client.Cliente, nombre string, n nivel) {
 	var ultimaDir uint8 = 255
 	teniaBandera := false   // ¿llevaba la bandera en la vuelta anterior?
 	entroDesdeToma := false // ¿entré al círculo desde que la tomé? (acuerdo 005)
+	esperando := false      // ya avisé que estoy a la espera de otra partida
 
 	for {
 		select {
@@ -119,12 +120,19 @@ func jugar(c *client.Cliente, nombre string, n nivel) {
 			return
 		case <-t.C:
 			s := c.Snapshot()
-			if s.Estado == protocol.StateFinished {
-				return
-			}
+			// La partida terminó, pero el servidor vuelve al lobby para jugar
+			// otra: en vez de desconectarnos, reseteamos y seguimos esperando.
 			if s.Estado != protocol.StateRunning {
+				if s.Estado == protocol.StateFinished && !esperando {
+					logf(nombre, "partida terminada; espero la próxima...")
+					esperando = true
+					ultimaDir = 255
+					teniaBandera = false
+					entroDesdeToma = false
+				}
 				continue
 			}
+			esperando = false
 			yo := s.Yo()
 			if yo == nil {
 				continue
