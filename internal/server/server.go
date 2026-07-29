@@ -66,6 +66,19 @@ type Server struct {
 
 	pendingInteract map[uint16]bool
 
+	// Estado extra que solo existe para el observador (ver vista.go). La
+	// interfaz del anfitrión lo lee una vez por cuadro; vive bajo el mismo mutex
+	// que el resto del estado del servidor.
+	countdown uint8
+	ganadorID uint16
+	ganador   string
+
+	// Registro de los últimos hechos de la partida, para mostrarlos en la
+	// interfaz. Tiene su propio mutex porque se escribe desde tick(), que ya
+	// tiene s.mu tomado.
+	evMu    sync.Mutex
+	eventos []string
+
 	ln            net.Listener
 	udp           *net.UDPConn
 	discoveryPort int
@@ -189,11 +202,13 @@ func (s *Server) volverAlLobby() {
 	s.world.Reiniciar()
 	s.state = protocol.StateWaiting
 	s.pendingInteract = map[uint16]bool{}
+	s.countdown = 0
+	s.ganadorID, s.ganador = 0, ""
 	s.broadcastLobbyLocked()
 	jugadores := len(s.clients)
 	s.mu.Unlock()
 
-	s.log.Printf("de vuelta en el lobby con %d jugador(es). Escribí 'start' para otra partida.", jugadores)
+	s.evento("de vuelta en el lobby con %d jugador(es). Escribí 'start' para otra partida.", jugadores)
 }
 
 // Start dispara el inicio de la partida (lo hace el anfitrión). Encola la señal
@@ -320,7 +335,7 @@ func (s *Server) handleJoin(c *client, m protocol.Join) bool {
 	s.broadcastLobbyLocked()
 	s.mu.Unlock()
 
-	s.log.Printf("P%02d entró como %q (%d jugador(es) en el lobby)", id, name, count)
+	s.evento("P%02d entró como %q (%d jugador(es) en el lobby)", id, name, count)
 	// AutoStart es opcional: si se configuró, la partida arranca sola al llegar
 	// a N jugadores. Por defecto es 0, y la inicia el anfitrión con 'start'.
 	if s.opt.AutoStart > 0 && count >= s.opt.AutoStart {
@@ -374,17 +389,19 @@ func (s *Server) disconnect(c *client) {
 		s.broadcastLobbyLocked()
 	}
 	s.mu.Unlock()
-	s.log.Printf("P%02d se desconectó", c.playerID)
+	s.evento("P%02d se desconectó", c.playerID)
 }
 
 func (s *Server) runCountdown() {
 	s.mu.Lock()
 	s.state = protocol.StateStarting
+	s.countdown = uint8(s.opt.CountdownSecs)
 	s.mu.Unlock()
-	s.log.Printf("iniciando cuenta regresiva (%d s)", s.opt.CountdownSecs)
+	s.evento("iniciando cuenta regresiva (%d s)", s.opt.CountdownSecs)
 
 	for i := s.opt.CountdownSecs; i > 0; i-- {
 		s.mu.Lock()
+		s.countdown = uint8(i)
 		s.broadcastLocked(protocol.GameCountdown{SecondsRemaining: uint8(i)})
 		s.mu.Unlock()
 		select {
@@ -407,7 +424,7 @@ func (s *Server) runGame() {
 		Flag:           s.flagLocked(), Players: s.playersFullLocked(),
 	})
 	s.mu.Unlock()
-	s.log.Printf("¡partida iniciada! %d jugadores en el mapa", len(s.clients))
+	s.evento("¡partida iniciada! %d jugadores en el mapa", len(s.clients))
 
 	ticker := time.NewTicker(time.Duration(cfg.TickIntervalMs) * time.Millisecond)
 	defer ticker.Stop()
@@ -436,29 +453,36 @@ func (s *Server) tick() bool {
 	// §29.11: primero los eventos, después el estado.
 	for _, id := range ev.PickedUp {
 		s.broadcastLocked(protocol.FlagPickedUp{Tick: s.world.Tick, PlayerID: id})
-		s.log.Printf("tick %d: P%02d tomó la bandera", s.world.Tick, id)
+		s.evento("tick %d: %s tomó la bandera", s.world.Tick, s.nombreLocked(id))
 	}
 	for _, st := range ev.Stolen {
 		s.broadcastLocked(protocol.FlagStolen{Tick: s.world.Tick,
 			PreviousCarrierID: st.Previous, NewCarrierID: st.New})
-		s.log.Printf("tick %d: P%02d le robó la bandera a P%02d", s.world.Tick, st.New, st.Previous)
+		s.evento("tick %d: %s le robó la bandera a %s",
+			s.world.Tick, s.nombreLocked(st.New), s.nombreLocked(st.Previous))
 	}
 	s.broadcastLocked(protocol.GameState{
 		Tick: s.world.Tick, Flag: s.flagLocked(), Players: s.playersCompactLocked(),
 	})
 
 	if ev.Winner != 0 {
-		p := s.world.Player(ev.Winner)
-		name := fmt.Sprintf("P%02d", ev.Winner)
-		if p != nil {
-			name = p.Name
-		}
+		name := s.nombreLocked(ev.Winner)
 		s.state = protocol.StateFinished
+		s.ganadorID, s.ganador = ev.Winner, name
 		s.broadcastLocked(protocol.GameOver{WinnerID: ev.Winner, WinnerName: name, Reason: 0x01})
-		s.log.Printf("tick %d: ¡ganó %s!", s.world.Tick, name)
+		s.evento("tick %d: ¡ganó %s!", s.world.Tick, name)
 		return true
 	}
 	return false
+}
+
+// nombreLocked devuelve el nombre de un jugador, o "P07" si ya no está (se pudo
+// haber desconectado en el mismo ciclo). Asume el mutex tomado.
+func (s *Server) nombreLocked(id uint16) string {
+	if p := s.world.Player(id); p != nil && p.Name != "" {
+		return p.Name
+	}
+	return fmt.Sprintf("P%02d", id)
 }
 
 // ---------- difusión (asumen el mutex tomado) ----------

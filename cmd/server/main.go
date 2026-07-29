@@ -6,6 +6,7 @@
 // Ejemplos:
 //
 //	go run ./cmd/server                 # arranca con Enter, mundo normal
+//	go run ./cmd/server -ui             # con ventana: botón de inicio y partida en vivo
 //	go run ./cmd/server -autostart 2    # arranca solo al llegar 2 jugadores
 //	go run ./cmd/server -small          # mundo chico (rápido de probar)
 //
@@ -27,6 +28,9 @@ import (
 	"ctf/internal/game"
 	"ctf/internal/protocol"
 	"ctf/internal/server"
+	"ctf/internal/serverui"
+
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 func main() {
@@ -37,6 +41,7 @@ func main() {
 	maxPlayers := flag.Int("max", 100, "máximo de jugadores admitidos")
 	postgame := flag.Int("postgame", 5, "segundos que se muestra el resultado antes de volver al lobby")
 	small := flag.Bool("small", false, "usar el mundo chico y rápido de las demos")
+	conUI := flag.Bool("ui", false, "abrir la ventana del anfitrión: botón de inicio y partida en vivo")
 	debug := flag.Bool("debug", false, "mostrar cada mensaje en hex con desglose byte por byte")
 	save := flag.Bool("save", false, "guardar el log de cada partida en un archivo (carpeta logs/)")
 	flag.Parse()
@@ -73,7 +78,8 @@ func main() {
 	}
 
 	// Sin -autostart, el anfitrión inicia cada partida escribiendo 'start' en
-	// esta terminal. El lector sigue activo entre partidas.
+	// esta terminal. El lector sigue activo entre partidas, y también cuando hay
+	// ventana: los dos caminos terminan llamando a s.Start().
 	if *autostart == 0 {
 		go func() {
 			fmt.Println(">>> Escribí 'start' y Enter para iniciar la partida (con los jugadores que haya) <<<")
@@ -105,5 +111,28 @@ func main() {
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() { <-sig; fmt.Println("\ncerrando..."); protocol.CerrarGuardado(); s.Close(); os.Exit(0) }()
 
+	if *conUI {
+		correrConVentana(s, *name)
+		return
+	}
 	s.Run()
+}
+
+// correrConVentana levanta la interfaz del anfitrión. El bucle de partidas pasa
+// a una goroutine porque Ebitengine exige quedarse con la goroutine principal.
+// Cerrar la ventana apaga el servidor: es la consola del anfitrión.
+func correrConVentana(s *server.Server, nombre string) {
+	go s.Run()
+
+	ebiten.SetWindowSize(serverui.Ancho, serverui.Alto)
+	ebiten.SetWindowTitle("Servidor — " + nombre)
+	err := ebiten.RunGame(serverui.Nuevo(s))
+
+	fmt.Println("cerrando el servidor...")
+	protocol.CerrarGuardado()
+	s.Close()
+	if err != nil && err != serverui.ErrCerrar {
+		fmt.Fprintln(os.Stderr, "error de la interfaz:", err)
+		os.Exit(1)
+	}
 }
