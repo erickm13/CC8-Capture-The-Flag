@@ -1,4 +1,5 @@
 # Captura la Bandera — CC8
+Repositorio donde se discutio el protocolo a utilizar: https://github.com/erickm13/CC8-Protocolo
 
 Juego multijugador en red donde varios jugadores compiten por una única bandera.
 Implementación en Go del protocolo **PRFC-CC8-2026 v3.0** (transporte binario),
