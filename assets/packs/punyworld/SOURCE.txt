@@ -1,0 +1,4 @@
+Puny World (overworld tileset) — pixel art 16x16.
+Origen: itch.io (buscar "Puny World"). El zip descargado NO incluía archivo de
+licencia; CONFIRMAR los términos de uso antes de distribuir/commitear.
+Se usa solo el tileset y las animaciones del .tsx (agua).

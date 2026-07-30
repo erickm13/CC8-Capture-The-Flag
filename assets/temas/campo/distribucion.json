@@ -1,0 +1,7 @@
+{
+  "cantCultivos": 7,
+  "cantArboles": 48,
+  "cantProps": 20,
+  "graneros": [[110, 120], [690, 130], [130, 690], [680, 680]],
+  "semilla": 1
+}

@@ -39,9 +39,12 @@ func main() {
 	dport := flag.Int("discovery-port", 5001, "puerto UDP del descubrimiento")
 	name := flag.String("name", "jugador", "tu nombre")
 	menu := flag.String("menu", "terminal", "cómo elegir servidor sin -addr: 'terminal' o 'ventana'")
+	tema := flag.String("tema", "", "forzar tema visual (ej: campo, puny); vacío = al azar")
 	debug := flag.Bool("debug", false, "mostrar cada mensaje en hex con desglose byte por byte")
 	save := flag.Bool("save", false, "guardar el log de cada partida en un archivo (carpeta logs/)")
 	flag.Parse()
+
+	ui.ForzarTema(*tema)
 
 	protocol.DebugActivo = *debug
 	if *save {

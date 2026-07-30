@@ -1,0 +1,12 @@
+{
+  "pack": "Puny World",
+  "pasto": [0, 1],
+  "tierraColor": "#d9c48f",
+  "cultivos": [],
+  "decoracion": [784, 810, 837],
+  "props": [],
+  "edificio": [],
+  "jugador": -1,
+  "bandera": 817,
+  "agua": 296
+}

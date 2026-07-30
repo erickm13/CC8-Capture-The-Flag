@@ -12,6 +12,8 @@ package ui
 import (
 	"fmt"
 	"image/color"
+	"math"
+	"math/rand"
 	"time"
 
 	"ctf/internal/client"
@@ -48,6 +50,16 @@ const (
 type Juego struct {
 	nombre string
 
+	// Apariencia (sprites pixel-art).
+	tema       Tema
+	fondo      *ebiten.Image // fondo del juego (pasto + sembradío); se cachea
+	fondoMap   float64       // MapSize con el que se construyó el fondo
+	fondoLobby *ebiten.Image // fondo del lobby (pasto tileado); se cachea
+
+	// Capa de agua animada: celdas (esquina sup-izq, en píxeles) que se
+	// redibujan cada cuadro con el frame actual del tile de agua.
+	aguaCeldas [][2]float64
+
 	// Estado del juego (modo jugando).
 	cli                *client.Cliente
 	teclaInteractAntes bool
@@ -64,7 +76,7 @@ type Juego struct {
 // Nuevo crea la interfaz con un cliente ya conectado (arranca jugando). Se usa
 // cuando el servidor se eligió por terminal o con -addr.
 func Nuevo(cli *client.Cliente, nombre string) *Juego {
-	return &Juego{cli: cli, nombre: nombre, m: modoJuego}
+	return &Juego{cli: cli, nombre: nombre, m: modoJuego, tema: temaAleatorio()}
 }
 
 // NuevoConSeleccion crea la interfaz arrancando en la pantalla de selección de
@@ -73,7 +85,7 @@ func Nuevo(cli *client.Cliente, nombre string) *Juego {
 func NuevoConSeleccion(nombre string, dport int) *Juego {
 	esc := discovery.NuevoEscáner(dport, 1200*time.Millisecond, 2*time.Second)
 	esc.Iniciar()
-	return &Juego{nombre: nombre, m: modoSeleccion, esc: esc, dport: dport}
+	return &Juego{nombre: nombre, m: modoSeleccion, esc: esc, dport: dport, tema: temaAleatorio()}
 }
 
 // Update se llama una vez por cuadro. Aquí leemos el teclado y se lo mandamos al
@@ -143,9 +155,10 @@ func (g *Juego) Draw(pantalla *ebiten.Image) {
 		return
 	}
 	if g.m == modoError {
-		ebitenutil.DebugPrintAt(pantalla, "No se pudo conectar al servidor:", 40, 60)
-		ebitenutil.DebugPrintAt(pantalla, g.errMsg, 40, 84)
-		ebitenutil.DebugPrintAt(pantalla, "Escape para salir.", 40, 120)
+		_ = cargarAssets(g.tema.Pack) // carga tiles+fuente (ignora error: hay respaldo)
+		escribir(pantalla, "No se pudo conectar al servidor:", 40, 60, tamMedio, color.RGBA{240, 120, 100, 255}, false)
+		escribir(pantalla, g.errMsg, 40, 96, tamChico, color.White, false)
+		escribir(pantalla, "Escape para salir.", 40, 140, tamChico, color.RGBA{200, 200, 210, 255}, false)
 		return
 	}
 
@@ -161,6 +174,9 @@ func (g *Juego) Draw(pantalla *ebiten.Image) {
 	if cfg.MapSize == 0 {
 		return // todavía no llegó GAME_STARTED
 	}
+	if cargarAssets(g.tema.Pack) != nil {
+		return // sin sprites no hay nada que dibujar (raro: están embebidos)
+	}
 
 	// Conversión de unidades de mundo a píxeles. El mundo va de -MapSize/2 a
 	// +MapSize/2; la pantalla de 0 a Ancho. El eje y de la pantalla ya crece
@@ -172,50 +188,274 @@ func (g *Juego) Draw(pantalla *ebiten.Image) {
 		return float32(px), float32(py)
 	}
 
-	// El círculo central.
-	cx, cy := aPantalla(0, 0)
-	vector.StrokeCircle(pantalla, cx, cy, float32(cfg.CircleRadius*escala), 2,
-		color.RGBA{80, 80, 120, 255}, true)
+	// Fondo pre-renderizado (pasto + disco de sembradío + decoración). Se
+	// construye una sola vez por tamaño de mapa y se reutiliza en cada cuadro.
+	if g.fondo == nil || g.fondoMap != cfg.MapSize {
+		g.fondo = g.construirFondo(cfg)
+		g.fondoMap = cfg.MapSize
+	}
+	pantalla.DrawImage(g.fondo, nil)
 
-	// La bandera, si está en el suelo.
-	if s.Bandera.Status == protocol.FlagAvailable || s.Bandera.Status == protocol.FlagDropped {
-		fx, fy := aPantalla(s.Bandera.X, s.Bandera.Y)
-		col := color.RGBA{240, 200, 40, 255} // amarilla
-		if s.Bandera.Status == protocol.FlagDropped {
-			col = color.RGBA{240, 120, 40, 255} // naranja si está caída
+	// Capa de agua animada (estanques): se redibuja cada cuadro con el frame
+	// actual. El fondo estático deja huecos de pasto donde va el agua.
+	if g.tema.Agua >= 0 && len(g.aguaCeldas) > 0 {
+		ms := time.Now().UnixMilli()
+		img := tileAnimado(g.tema.Agua, ms)
+		for _, c := range g.aguaCeldas {
+			dibujarTile(pantalla, img, c[0], c[1], 2)
 		}
-		vector.DrawFilledRect(pantalla, fx-6, fy-10, 12, 20, col, true)
 	}
 
-	// Los jugadores.
+	// Cuadrado rojo de interacción: si estoy a tiro de tomar/robar la bandera,
+	// resalto el objetivo (como el indicador del mockup de referencia).
+	g.dibujarIndicadorInteract(pantalla, s, cfg, escala, aPantalla)
+
+	// La bandera, si está en el suelo (girasol).
+	if s.Bandera.Status == protocol.FlagAvailable || s.Bandera.Status == protocol.FlagDropped {
+		fx, fy := aPantalla(s.Bandera.X, s.Bandera.Y)
+		dibujarTileCentrado(pantalla, tile(g.tema.Bandera), float64(fx), float64(fy), 2)
+	}
+
+	// Los jugadores: un disco de color (equipo) como base y el sprite encima.
 	for _, p := range s.Jugadores {
 		px, py := aPantalla(p.X, p.Y)
 		col := colorJugador(p.ID, p.ID == s.MiID)
 		radio := float32(cfg.PlayerRadius * escala)
-		if radio < 5 {
-			radio = 5
+		if radio < 12 {
+			radio = 12
 		}
 		vector.DrawFilledCircle(pantalla, px, py, radio, col, true)
-
-		// Si lleva la bandera, un anillo amarillo alrededor.
-		if p.HasFlag {
-			vector.StrokeCircle(pantalla, px, py, radio+4, 2, color.RGBA{240, 200, 40, 255}, true)
+		if p.ID == s.MiID {
+			// Aro blanco para reconocerme de un vistazo.
+			vector.StrokeCircle(pantalla, px, py, radio+2, 2, color.RGBA{255, 255, 255, 255}, true)
+		}
+		// Sprite del jugador encima del disco. Si el tema no tiene sprite de
+		// jugador (Jugador < 0), queda solo el disco de color.
+		if g.tema.Jugador >= 0 {
+			factor := float64(radio*2.4) / 16
+			dibujarTileCentrado(pantalla, tile(g.tema.Jugador), float64(px), float64(py), factor)
 		}
 
-		// El nombre encima. En GAME_STATE no viene el nombre, pero el propio
-		// jugador sabe el suyo; los demás se muestran como P01, P02...
-		// El nombre encima de cada jugador. Los nombres se recibieron en
-		// GAME_STARTED/LOBBY_STATE; el GAME_STATE no los trae (§29.6). Nombre()
-		// los busca por ID y cae en "P01" solo si no lo conoce.
+		// Si lleva la bandera, un aro amarillo y un girasol chico encima.
+		if p.HasFlag {
+			vector.StrokeCircle(pantalla, px, py, radio+6, 2, color.RGBA{240, 200, 40, 255}, true)
+			dibujarTileCentrado(pantalla, tile(g.tema.Bandera), float64(px), float64(py)-float64(radio)-10, 1)
+		}
+
+		// El nombre encima. En GAME_STATE no viene el nombre (§29.6); Nombre()
+		// lo busca por ID (recibido en GAME_STARTED/LOBBY_STATE) y cae en "P01".
 		etiqueta := s.Nombre(p.ID)
-		ebitenutil.DebugPrintAt(pantalla, etiqueta, int(px)-10, int(py)-int(radio)-16)
+		escribir(pantalla, etiqueta, float64(px), float64(py)-float64(radio)-20, tamChico, color.White, true)
 	}
 
 	// Panel de información arriba.
 	g.dibujarHUD(pantalla, s)
 }
 
+// dibujarIndicadorInteract dibuja un recuadro rojo alrededor de la bandera (o de
+// quien la lleva) cuando el jugador propio está a distancia de interactuar.
+func (g *Juego) dibujarIndicadorInteract(pantalla *ebiten.Image, s client.Snapshot, cfg protocol.GameStarted, escala float64, aPantalla func(x, y float64) (float32, float32)) {
+	yo := s.Yo()
+	if yo == nil {
+		return
+	}
+	var ox, oy float64
+	switch s.Bandera.Status {
+	case protocol.FlagCarried:
+		p := s.Portador()
+		if p == nil || p.ID == s.MiID {
+			return // no me marco a mí mismo
+		}
+		ox, oy = p.X, p.Y
+	case protocol.FlagAvailable, protocol.FlagDropped:
+		ox, oy = s.Bandera.X, s.Bandera.Y
+	default:
+		return
+	}
+	if math.Hypot(ox-yo.X, oy-yo.Y) > cfg.InteractionRadius {
+		return
+	}
+	sx, sy := aPantalla(ox, oy)
+	lado := float32(cfg.PlayerRadius*escala) * 2.4
+	if lado < 26 {
+		lado = 26
+	}
+	vector.StrokeRect(pantalla, sx-lado/2, sy-lado/2, lado, lado, 2, color.RGBA{240, 60, 60, 255}, true)
+}
+
+// construirFondo arma la imagen de fondo del mapa una sola vez: pasto en toda la
+// grilla, el disco central texturizado como sembradío (recortado al círculo real
+// del juego), cultivos adentro y decoración afuera. Usa una semilla fija para
+// que el fondo sea estable entre cuadros.
+func (g *Juego) construirFondo(cfg protocol.GameStarted) *ebiten.Image {
+	img := ebiten.NewImage(Ancho, Alto)
+	rng := rand.New(rand.NewSource(g.tema.Semilla))
+	g.aguaCeldas = nil // se recalcula abajo si el tema tiene estanques
+
+	// Pasto: grilla de tiles escalados, variando el tile por celda.
+	const celda = 32                 // tamaño en pantalla de cada tile de pasto
+	const factorPasto = celda / 16.0 // 16px → 32px
+	for y := 0; y < Alto; y += celda {
+		for x := 0; x < Ancho; x += celda {
+			t := g.tema.Pasto[rng.Intn(len(g.tema.Pasto))]
+			dibujarTile(img, tile(t), float64(x), float64(y), factorPasto)
+		}
+	}
+
+	// El disco de tierra (sembradío). El mundo (0,0) cae en el centro de la
+	// pantalla independientemente de MapSize.
+	escala := float64(Ancho) / cfg.MapSize
+	cx, cy := float32(Ancho)/2, float32(Alto)/2
+	r := float32(cfg.CircleRadius * escala)
+	vector.DrawFilledCircle(img, cx, cy, r, g.tema.TierraColor, true)
+
+	// Pocos cultivos dentro del círculo, y lejos del centro para no competir con
+	// la bandera: solo unos brotes cerca del borde que insinúan el sembradío.
+	for i := 0; i < g.tema.CantCultivos; i++ {
+		ang := rng.Float64() * 2 * math.Pi
+		rad := (0.55 + 0.4*rng.Float64()) * (float64(r) - 24) // anillo exterior
+		px := float64(cx) + rad*math.Cos(ang)
+		py := float64(cy) + rad*math.Sin(ang)
+		c := g.tema.Cultivos[rng.Intn(len(g.tema.Cultivos))]
+		dibujarTileCentrado(img, tile(c), px, py, 1.5)
+	}
+
+	// Edificios (graneros) en posiciones fijas fuera del círculo, para que el
+	// pasto no se vea vacío. Guardamos sus zonas para no encimar decoración.
+	type zona struct{ x, y, r float64 }
+	var ocupado []zona
+	if len(g.tema.Edificio) > 0 {
+		const factorEd = 3.0
+		alto := float64(len(g.tema.Edificio)) * 16 * factorEd
+		for _, sp := range g.tema.Graneros {
+			g.dibujarEdificio(img, g.tema.Edificio, sp[0], sp[1], factorEd)
+			ocupado = append(ocupado, zona{sp[0], sp[1], alto * 0.6})
+		}
+	}
+
+	libre := func(x, y, margen float64) bool {
+		if math.Hypot(x-float64(cx), y-float64(cy)) < float64(r)+margen {
+			return false
+		}
+		for _, z := range ocupado {
+			if math.Hypot(x-z.x, y-z.y) < z.r+margen {
+				return false
+			}
+		}
+		return true
+	}
+
+	// Árboles y arbustos, más densos, salpicando todo el pasto.
+	for i := 0; i < g.tema.CantArboles; i++ {
+		x := rng.Float64() * Ancho
+		y := rng.Float64() * Alto
+		if !libre(x, y, 24) {
+			continue
+		}
+		d := g.tema.Decoracion[rng.Intn(len(g.tema.Decoracion))]
+		dibujarTileCentrado(img, tile(d), x, y, 1.6)
+	}
+
+	// Props y animales (heno, barriles, vacas, ovejas...) para darle vida.
+	for i := 0; i < g.tema.CantProps; i++ {
+		x := rng.Float64() * Ancho
+		y := rng.Float64() * Alto
+		if !libre(x, y, 22) {
+			continue
+		}
+		p := g.tema.Props[rng.Intn(len(g.tema.Props))]
+		dibujarTileCentrado(img, tile(p), x, y, 1.5)
+	}
+
+	// Estanques de agua animada: NO se hornean (deben animarse). Guardamos las
+	// celdas dentro de cada estanque para redibujarlas cada cuadro en Draw.
+	if g.tema.Agua >= 0 {
+		const pondR = 84.0
+		for _, e := range g.tema.Estanques {
+			for y := e[1] - pondR; y <= e[1]+pondR; y += celda {
+				for x := e[0] - pondR; x <= e[0]+pondR; x += celda {
+					// centro de la celda dentro del radio del estanque
+					if math.Hypot(x+celda/2-e[0], y+celda/2-e[1]) <= pondR {
+						g.aguaCeldas = append(g.aguaCeldas, [2]float64{x, y})
+					}
+				}
+			}
+		}
+	}
+
+	// Contorno tenue del círculo, para que el borde del área se lea claro.
+	vector.StrokeCircle(img, cx, cy, r, 2, color.RGBA{120, 90, 60, 255}, true)
+	return img
+}
+
+// dibujarEdificio dibuja un edificio multi-tile (matriz de índices) centrado en
+// (cx, cy) y escalado por factor. Cada celda es un tile de 16×16.
+func (g *Juego) dibujarEdificio(dst *ebiten.Image, ed [][]int, cx, cy, factor float64) {
+	celda := 16 * factor
+	ancho := float64(len(ed[0])) * celda
+	alto := float64(len(ed)) * celda
+	x0 := cx - ancho/2
+	y0 := cy - alto/2
+	for fila, cols := range ed {
+		for col, idx := range cols {
+			dibujarTile(dst, tile(idx), x0+float64(col)*celda, y0+float64(fila)*celda, factor)
+		}
+	}
+}
+
 func (g *Juego) dibujarLobby(pantalla *ebiten.Image, s client.Snapshot) {
+	// Sin sprites caemos al lobby de texto plano (no debería pasar: van embebidos).
+	if cargarAssets(g.tema.Pack) != nil {
+		g.dibujarLobbyTexto(pantalla, s)
+		return
+	}
+
+	// Fondo: pasto tileado (cacheado, determinista para que no titile).
+	if g.fondoLobby == nil {
+		g.fondoLobby = g.construirFondoLobby()
+	}
+	pantalla.DrawImage(g.fondoLobby, nil)
+
+	// Panel de madera centrado, tamaño según cantidad de jugadores.
+	const px, pw = 180, 440
+	filas := len(s.Lobby)
+	ph := 200 + float64(filas)*30
+	if ph > 560 {
+		ph = 560
+	}
+	py := (float64(Alto) - ph) / 2
+	dibujarPanel(pantalla, panelClaro, px, py, pw, ph)
+
+	// Barra de título (panel oscuro) arriba del panel.
+	dibujarPanel(pantalla, panelOscuro, px+24, py+20, pw-48, 54)
+	titulo := "SALA DE ESPERA"
+	tituloCol := color.RGBA{255, 220, 150, 255}
+	if s.Estado == protocol.StateStarting {
+		titulo = fmt.Sprintf("¡EMPIEZA EN %d!", s.Countdown)
+		tituloCol = color.RGBA{140, 240, 150, 255}
+	}
+	escribir(pantalla, titulo, px+pw/2, py+30, tamMedio, tituloCol, true)
+
+	// Lista de jugadores, con un punto de color de equipo por cada uno.
+	yFila := py + 96
+	escribir(pantalla, "Jugadores:", px+34, yFila-6, tamChico, color.RGBA{230, 220, 200, 255}, false)
+	yFila += 22
+	for _, p := range s.Lobby {
+		col := colorJugador(p.ID, p.ID == s.MiID)
+		vector.DrawFilledCircle(pantalla, float32(px)+44, float32(yFila)+8, 7, col, true)
+		linea := fmt.Sprintf("P%02d  %s", p.ID, p.Name)
+		if p.ID == s.MiID {
+			linea += "  (yo)"
+		}
+		escribir(pantalla, linea, px+60, yFila, tamChico, color.White, false)
+		yFila += 30
+	}
+
+	escribir(pantalla, "Esperando al anfitrión...", px+pw/2, py+ph-32, tamChico, color.RGBA{210, 200, 185, 255}, true)
+}
+
+// dibujarLobbyTexto es el lobby de respaldo, sin sprites (solo texto).
+func (g *Juego) dibujarLobbyTexto(pantalla *ebiten.Image, s client.Snapshot) {
 	y := 40
 	titulo := "SALA DE ESPERA"
 	if s.Estado == protocol.StateStarting {
@@ -236,6 +476,24 @@ func (g *Juego) dibujarLobby(pantalla *ebiten.Image, s client.Snapshot) {
 	ebitenutil.DebugPrintAt(pantalla, "Esperando a que el anfitrión inicie la partida...", 40, Alto-40)
 }
 
+// construirFondoLobby arma un fondo de pasto tileado, estable entre cuadros
+// (elección de tile determinista por celda, sin azar que titile).
+func (g *Juego) construirFondoLobby() *ebiten.Image {
+	img := ebiten.NewImage(Ancho, Alto)
+	const celda = 32
+	const factor = celda / 16.0
+	cols := len(g.tema.Pasto)
+	for fy := 0; fy < Alto; fy += celda {
+		for fx := 0; fx < Ancho; fx += celda {
+			t := g.tema.Pasto[((fx/celda)+(fy/celda))%cols]
+			dibujarTile(img, tile(t), float64(fx), float64(fy), factor)
+		}
+	}
+	// Velo oscuro para que el panel y el texto resalten.
+	vector.DrawFilledRect(img, 0, 0, Ancho, Alto, color.RGBA{0, 0, 0, 90}, true)
+	return img
+}
+
 func (g *Juego) dibujarHUD(pantalla *ebiten.Image, s client.Snapshot) {
 	estado := "bandera libre"
 	switch s.Bandera.Status {
@@ -244,16 +502,23 @@ func (g *Juego) dibujarHUD(pantalla *ebiten.Image, s client.Snapshot) {
 	case protocol.FlagDropped:
 		estado = "bandera caída"
 	}
-	linea := fmt.Sprintf("tick %d   %s   |   flechas o WASD: mover   espacio: tomar/robar",
-		s.Tick, estado)
-	ebitenutil.DebugPrintAt(pantalla, linea, 8, 8)
+
+	// Franja superior semitransparente para que el texto se lea sobre el mapa.
+	vector.DrawFilledRect(pantalla, 0, 0, Ancho, 30, color.RGBA{0, 0, 0, 130}, true)
+	escribir(pantalla, fmt.Sprintf("tick %d", s.Tick), 8, 6, tamChico, color.RGBA{200, 210, 230, 255}, false)
+	escribir(pantalla, estado, 130, 6, tamChico, color.RGBA{255, 225, 150, 255}, false)
+	escribirDer(pantalla, "WASD/flechas: mover   espacio: tomar/robar", Ancho-8, 6, tamChico, color.RGBA{190, 200, 210, 255})
 
 	if s.Estado == protocol.StateFinished {
-		msg := fmt.Sprintf(">>> GANÓ %s <<<", s.Ganador)
+		msg := fmt.Sprintf("GANÓ %s", s.Ganador)
+		col := color.RGBA{255, 230, 140, 255}
 		if s.GanadorID == s.MiID {
-			msg = ">>> ¡GANASTE! <<<"
+			msg = "¡GANASTE!"
+			col = color.RGBA{140, 240, 150, 255}
 		}
-		ebitenutil.DebugPrintAt(pantalla, msg, Ancho/2-60, Alto/2)
+		// Cartel central sobre un panel oscuro.
+		vector.DrawFilledRect(pantalla, 0, Alto/2-44, Ancho, 88, color.RGBA{0, 0, 0, 150}, true)
+		escribir(pantalla, msg, Ancho/2, Alto/2-18, tamGrande, col, true)
 	}
 }
 
@@ -325,15 +590,23 @@ func (g *Juego) conectarA(addr string) {
 }
 
 func (g *Juego) drawSeleccion(pantalla *ebiten.Image) {
-	ebitenutil.DebugPrintAt(pantalla, "CAPTURA LA BANDERA", selFilaX, 30)
-	ebitenutil.DebugPrintAt(pantalla, "Elegí un servidor (clic). La lista se actualiza sola. Escape para salir.", selFilaX, 60)
-	ebitenutil.DebugPrintAt(pantalla, fmt.Sprintf("Jugás como: %s", g.nombre), selFilaX, 84)
+	_ = cargarAssets(g.tema.Pack) // asegura tiles y fuente
+
+	// Fondo de pasto (mismo que el lobby) para dar contexto visual.
+	if g.fondoLobby == nil {
+		g.fondoLobby = g.construirFondoLobby()
+	}
+	pantalla.DrawImage(g.fondoLobby, nil)
+
+	escribir(pantalla, "CAPTURA LA BANDERA", Ancho/2, 26, tamGrande, color.RGBA{255, 220, 150, 255}, true)
+	escribir(pantalla, "Elegí un servidor (clic). La lista se actualiza sola.", Ancho/2, 68, tamChico, color.RGBA{220, 220, 230, 255}, true)
+	escribir(pantalla, fmt.Sprintf("Jugás como: %s     (Escape para salir)", g.nombre), Ancho/2, 90, tamChico, color.RGBA{180, 220, 190, 255}, true)
 
 	if g.esc != nil {
 		g.filas = g.esc.Lista()
 	}
 	if len(g.filas) == 0 {
-		ebitenutil.DebugPrintAt(pantalla, "Buscando servidores en la red...", selFilaX, selFilaY0)
+		escribir(pantalla, "Buscando servidores en la red...", Ancho/2, selFilaY0+20, tamMedio, color.White, true)
 		return
 	}
 
@@ -342,20 +615,24 @@ func (g *Juego) drawSeleccion(pantalla *ebiten.Image) {
 		y := selFilaY0 + i*selFilaAltura
 		encima := mx >= selFilaX && mx <= selFilaX+selFilaAncho && my >= y && my < y+selFilaAltura-6
 
-		fondo := color.RGBA{34, 34, 44, 255}
+		fondo := color.RGBA{34, 34, 44, 230}
 		if encima {
-			fondo = color.RGBA{50, 90, 70, 255}
+			fondo = color.RGBA{50, 100, 74, 240}
 		}
 		vector.DrawFilledRect(pantalla, float32(selFilaX), float32(y),
 			float32(selFilaAncho), float32(selFilaAltura-6), fondo, true)
 
 		estado := "esperando"
+		estadoCol := color.RGBA{160, 210, 255, 255}
 		if sv.State == protocol.StateRunning {
 			estado = "jugando"
+			estadoCol = color.RGBA{255, 200, 120, 255}
 		}
-		linea := fmt.Sprintf("%-20s  %-22s  %s  %d/%d",
-			recortarUI(sv.ServerName, 20), sv.Addr(), estado, sv.PlayerCount, sv.MaximumPlayers)
-		ebitenutil.DebugPrintAt(pantalla, linea, selFilaX+10, y+12)
+		fy := float64(y) + 10
+		escribir(pantalla, recortarUI(sv.ServerName, 22), selFilaX+12, fy, tamChico, color.White, false)
+		escribir(pantalla, sv.Addr(), selFilaX+300, fy, tamChico, color.RGBA{200, 205, 215, 255}, false)
+		escribir(pantalla, estado, selFilaX+480, fy, tamChico, estadoCol, false)
+		escribirDer(pantalla, fmt.Sprintf("%d/%d", sv.PlayerCount, sv.MaximumPlayers), float64(selFilaX+selFilaAncho)-12, fy, tamChico, color.White)
 	}
 }
 
