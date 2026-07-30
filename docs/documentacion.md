@@ -108,6 +108,9 @@ implementación produce esos cinco bytes, puede interoperar.
 
 ## Fase 3 — Implementación del juego en Go, en 6 partes
 
+> 📌 **Commit:** `57d0d5d` — *upload files for connection game* (las Partes 1–5
+> completas: protocolo, motor, servidor, descubrimiento, cliente, bot y sonda).
+
 **Prompt:** *"ahora haz el juego en base a ese prfc dividelo en partes para ir
 implementandolo y yo ir probandolo en cada parte"*
 
@@ -200,6 +203,10 @@ cayendo (`DROPPED`), que funcionó según el protocolo.
 
 ### Parte 6 — La interfaz gráfica (Ebitengine)
 
+> 📌 **Commits:** `57d0d5d` (cliente y base gráfica) · `a89bafe` — *add interface
+> for server* (la ventana del anfitrión: `internal/serverui`, botón de inicio y
+> partida en vivo).
+
 **Prompt:** *"si"* (para continuar con la interfaz)
 
 La parte visual: dibuja el círculo, los jugadores, la bandera, y traduce el
@@ -215,6 +222,8 @@ Con el juego funcionando, siguieron una serie de mejoras pedidas a partir del us
 real.
 
 ### Inicio manual de la partida
+
+> 📌 **Commit:** `8be2d79` — *add command start in server*.
 
 **Prompt:** *"en lugar que espere un numero de jugadores mejor un comando start
 inicie la partida y en la interfaz un boton start si aunque le pongamos maximo 100
@@ -236,6 +245,9 @@ Quedó un comando `start` en la terminal del servidor, sin modificar el protocol
 
 ### Partidas en bucle
 
+> 📌 **Commits:** `0d2ec1e` — *add return to lobby function* · `5eef4b0` — *fixed
+> bug init game at server selection* (la carrera que se tragaba el segundo 'start').
+
 **Prompt:** *"ahorita cuando termina la partida el servidor se cierra
 automaticamente no ?"*
 
@@ -256,6 +268,8 @@ del canal que la causaba.
 
 ### Pausa antes de volver al lobby
 
+> 📌 **Commit:** `5f93510` — *fixed bug with sending packages GAME_OVER very fast*.
+
 **Prompt:** *"si solo que un compañero se conecto pero no le aparecio el gano
 salchipapa pero cuando se conecta a otros si le aparece"*
 
@@ -265,6 +279,9 @@ Se agregó una pausa configurable (`-postgame`), respetando el principio de "sé
 estricto con lo que envías, tolerante con lo que recibís".
 
 ### Selección de servidores
+
+> 📌 **Commits:** `e6b3db6` — *search servers* · `5eef4b0` — *fixed bug init game
+> at server selection* (el rediseño a una sola ventana que cambia de pantalla).
 
 **Prompt:** *"seria bueno que el cliente tenga una interfaz para mostrar los
 servidores disponibles por si quiero conectarme a uno en especifico"*
@@ -280,6 +297,9 @@ Se rediseñó para usar una sola ventana que cambia de pantalla internamente, en
 de cerrar y reabrir.
 
 ### Herramientas de depuración para interoperabilidad
+
+> 📌 **Commit:** `4fedab7` — *add logs for watching packages sending for client
+> and server* (los flags `-debug` y `-save`).
 
 **Prompt:** *"no podriamos agregar logs de lado del server y cliente justo asi como
 como me lo mostraste ahora, como envia el codigo y que codigo retorna"*
@@ -304,6 +324,8 @@ con fecha y hora en el nombre.
 
 ### Mostrar los nombres reales de los jugadores
 
+> 📌 **Commit:** `c09ab74` — *show all players names in game*.
+
 **Prompt:** *"en los nombres de los jugadores muestra P01, P01 no se podria mostrar
 el nombre de cada jugador ?"*
 
@@ -315,6 +337,10 @@ dibujar.
 ---
 
 ## Fase 5 — Cómo quedó implementado el backend (servidor y cliente)
+
+> 📌 **Commits:** el backend base nació en `57d0d5d` (*upload files for connection
+> game*) y se fue refinando en `8be2d79`, `0d2ec1e`, `e6b3db6`, `5eef4b0`,
+> `5f93510`, `4fedab7` y `c09ab74`. Cada subsección abajo indica el suyo.
 
 Esta sección documenta en detalle cómo funciona la parte de red del proyecto: la
 conexión TCP, el enmarcado de mensajes, el protocolo binario, el servidor, el
@@ -341,6 +367,8 @@ bytes en `protocol.MarshalBinary`, se le antepone el prefijo de longitud en
 sobre esas cuatro funciones.
 
 ### 5.1 — El enmarcado TCP (framing por longitud)
+
+> 📌 **Commit:** `57d0d5d` (`internal/protocol/codec.go`).
 
 **Prompt:** *"configura el enmarcado de TCP para que use un prefijo de longitud de
 2 bytes big-endian antes de cada mensaje, como pide el §23.2"*
@@ -385,6 +413,8 @@ El detalle clave es `io.ReadFull`: garantiza que se lean exactamente los bytes
 esperados aunque el sistema operativo entregue la lectura en varios pedazos.
 
 ### 5.2 — El códec binario
+
+> 📌 **Commit:** `57d0d5d` (`internal/protocol/codec.go`, `messages.go`).
 
 **Prompt:** *"configura los tipos base del protocolo (u8, u16, u32, i32, str) con
 helpers de lectura y escritura, para que el resto del códec se lea como la tabla
@@ -450,6 +480,10 @@ hacia arriba debe producir exactamente `11 03 00 07 01`. Si el códec de cualqui
 grupo genera esos cinco bytes, puede interoperar con el resto de la clase.
 
 ### 5.3 — El servidor TCP
+
+> 📌 **Commits:** base en `57d0d5d`; el comando `start` en `8be2d79`; el bucle de
+> partidas (`Run` → volver al lobby) en `0d2ec1e` (con el arreglo de carrera de
+> `5eef4b0`) y la pausa post-partida en `5f93510`.
 
 El servidor es el árbitro de la partida. No juega (§4): no tiene entidad en el
 mapa, solo coordina. Toda la lógica del juego vive en `internal/game`; este
@@ -617,6 +651,9 @@ les escribe el mismo mensaje ya serializado.
 
 ### 5.4 — El cliente reutilizable
 
+> 📌 **Commits:** base en `57d0d5d`; la tabla `playerId → nombre` en `c09ab74`
+> (*show all players names in game*); el no-cerrar-en-GAME_OVER en `0d2ec1e`.
+
 El cliente está pensado para que lo use cualquier capa de arriba: el bot y la
 interfaz gráfica. La idea central es que la red corre en su propia goroutine y
 mantiene el último estado recibido; quien lo usa solo llama a `Snapshot()` para
@@ -703,6 +740,10 @@ case protocol.GameOver:
 ```
 
 ### 5.5 — El descubrimiento por broadcast UDP
+
+> 📌 **Commits:** el respondedor UDP del servidor nació en `57d0d5d`
+> (`internal/server/discovery.go`); el escáner en vivo del cliente y la lista
+> refrescable en `e6b3db6` (*search servers*).
 
 Para no tener que escribir la IP del servidor a mano, el cliente puede encontrar
 las partidas de la red con un broadcast UDP (§19).
@@ -802,6 +843,8 @@ apareciendo y desapareciendo en vivo.
 
 ### 5.6 — Herramientas de depuración del backend
 
+> 📌 **Commit:** `4fedab7` (`internal/protocol/debug.go`, flags `-debug` / `-save`).
+
 **Prompt:** *"configura un flag -debug que imprima cada mensaje en hex con el
 desglose byte por byte, y un flag -save que guarde ese log en un archivo por
 partida"*
@@ -824,6 +867,10 @@ hex: 10 03 03 41 6E 61
 ---
 
 ## Fase 6 — El bot de IA (`cmd/bot`)
+
+> 📌 **Commits:** las tres mejoras de estrategia y la flag `-nivel` en `7151ef8`
+> (*add dificulty level in bots*); el que no se desconecte entre partidas en
+> `f71e5d2` (*persistent conection bots*).
 
 La Parte 5 incluye un bot que juega solo, encima del cliente reutilizable de la
 sección anterior. Esta fase documenta las mejoras que se le hicieron a su
@@ -897,6 +944,31 @@ Antes el bot salía al recibir `GAME_OVER`. Se corrigió para que, al detectar
 termina ahora es cuando la conexión se cierra de verdad (`c.Listo()`), es decir
 servidor apagado o kick. El reset de `ultimaDir = 255` asegura que el primer
 `Mover` de la nueva partida siempre se envíe.
+
+---
+
+## Mapa de commits ↔ secciones
+
+Resumen de qué commit del repositorio corresponde a cada parte de esta
+documentación. Los hashes son cortos; `git show <hash>` muestra el detalle.
+
+| Commit | Mensaje | Sección de esta documentación |
+|---|---|---|
+| `6767067` | Initial commit | (arranque del repo) |
+| `57d0d5d` | upload files for connection game | Fase 3 (Partes 1–5); Fase 5.1–5.5 (base) |
+| `8be2d79` | feat: add command start in server | Fase 4 · Inicio manual; Fase 5.3 |
+| `0d2ec1e` | feat: add return to lobby function | Fase 4 · Partidas en bucle; Fase 5.3 y 5.4 |
+| `e6b3db6` | feat: search servers | Fase 4 · Selección de servidores; Fase 5.5 |
+| `5eef4b0` | fix: bug init game at server selection | Fase 4 · Partidas en bucle / Selección |
+| `5f93510` | fix: envío de GAME_OVER muy rápido | Fase 4 · Pausa antes de volver al lobby; Fase 5.3 |
+| `4fedab7` | feat: logs de paquetes (cliente/servidor) | Fase 4 · Depuración; Fase 5.6 |
+| `c09ab74` | feat: show all players names in game | Fase 4 · Nombres reales; Fase 5.4 |
+| `7151ef8` | feat: dificulty level in bots | Fase 6 · mejoras del bot y flag `-nivel` |
+| `f71e5d2` | fix: persistent conection bots | Fase 6 · no desconectar entre partidas |
+| `a89bafe` | feat: add interface for server | Fase 3 · Parte 6 (ventana del anfitrión) |
+| `d71d4b5` / `d43dc40` | README.md | (documentación del repo) |
+| `42cde91` | Add documentation for AI usage | Fases 1–4 de este documento |
+| `9342e4d` | feat: documentation for game and architecture | Assets, fuentes y `ESTRUCTURA.md` |
 
 ---
 
